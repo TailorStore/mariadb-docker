@@ -9,13 +9,13 @@ services:
       - "3307:3306"
     volumes:
       # Mount host directory for persistent data storage
-      - ./data:/var/lib/mysql
+      - /var/mariadb/data:/var/lib/mysql
       # Mount host directory for custom configuration
-      - ./config:/etc/mysql/conf.d
+      - /var/mariadb/config:/etc/mysql/conf.d
       # Mount host directory for initialization scripts
-      - ./init:/docker-entrypoint-initdb.d
+      - /var/mariadb/init:/docker-entrypoint-initdb.d
       # Mount host directory for backups
-      - ./backups:/backups
+      - /var/mariadb/backups:/backups
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-myapp}
