@@ -232,6 +232,44 @@ download_file() {
     fi
 }
 
+optimize_for_import() {
+    local db_user="root"
+    local db_password="${MYSQL_ROOT_PASSWORD:-rootpassword}"
+    
+    log_info "Applying import optimizations..."
+    
+    # Apply production-safe import optimizations
+    mariadb -u "$db_user" -p"$db_password" -e "
+        SET GLOBAL innodb_flush_log_at_trx_commit = 0;
+        SET GLOBAL sync_binlog = 0;
+        SET GLOBAL innodb_io_capacity = 2000;
+        SET GLOBAL innodb_io_capacity_max = 4000;
+        SET GLOBAL key_buffer_size = 128*1024*1024;
+        SET GLOBAL max_allowed_packet = 1073741824;
+        SET GLOBAL query_cache_size = 0;
+        SELECT 'Import optimizations applied' AS Status;
+    " 2>/dev/null || log_warning "Some optimizations could not be applied"
+}
+
+restore_production_settings() {
+    local db_user="root"
+    local db_password="${MYSQL_ROOT_PASSWORD:-rootpassword}"
+    
+    log_info "Restoring production-safe settings..."
+    
+    # Restore production-safe settings
+    mariadb -u "$db_user" -p"$db_password" -e "
+        SET GLOBAL innodb_flush_log_at_trx_commit = 2;
+        SET GLOBAL sync_binlog = 1;
+        SET GLOBAL innodb_io_capacity = 200;
+        SET GLOBAL innodb_io_capacity_max = 400;
+        SET GLOBAL key_buffer_size = 32*1024*1024;
+        SET GLOBAL max_allowed_packet = 64*1024*1024;
+        SET GLOBAL query_cache_size = 128*1024*1024;
+        SELECT 'Production settings restored' AS Status;
+    " 2>/dev/null || log_warning "Some settings could not be restored"
+}
+
 import_database() {
     local file_path="$1"
     local file_name
@@ -248,13 +286,31 @@ import_database() {
     
     log_info "Importing into database: $db_name"
     
-    # Import with progress using pv
+    # Apply import optimizations before starting
+    optimize_for_import
+    
+    # Import with progress and optimizations
     log_info "Decompressing and importing database (this may take a while)..."
     
-    if pv "$file_path" | gunzip | mariadb -u "$db_user" -p"$db_password" "$db_name"; then
+    # Use optimized import with disabled checks for maximum speed
+    if {
+        echo "SET foreign_key_checks = 0;";
+        echo "SET unique_checks = 0;";
+        echo "SET autocommit = 0;";
+        pv "$file_path" | gunzip;
+        echo "COMMIT;";
+        echo "SET foreign_key_checks = 1;";
+        echo "SET unique_checks = 1;";
+        echo "SET autocommit = 1;";
+    } | mariadb -u "$db_user" -p"$db_password" "$db_name"; then
         log_success "Database import completed successfully!"
+        
+        # Restore production settings after successful import
+        restore_production_settings
     else
         log_error "Database import failed!"
+        # Restore production settings even on failure
+        restore_production_settings
         exit 1
     fi
 }
