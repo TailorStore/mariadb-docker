@@ -173,20 +173,48 @@ download_file() {
     log_info "Source: $s3_url"
     log_info "Destination: $local_path"
     
-    # Use AWS CLI with progress
-    if aws s3 cp "$s3_url" "$local_path" --region "$S3_REGION"; then
-        log_success "Download completed: $local_path"
+    # Get expected file size from S3 for pv progress monitoring
+    local expected_size
+    expected_size=$(aws s3 ls "s3://$S3_BUCKET/$file" --region "$S3_REGION" | awk '{print $3}')
+    
+    if [[ -n "$expected_size" && "$expected_size" =~ ^[0-9]+$ ]]; then
+        # Format size for display (simple human-readable conversion)
+        local size_display
+        if [[ $expected_size -gt 1073741824 ]]; then
+            size_display="$(( expected_size / 1073741824 ))GB"
+        elif [[ $expected_size -gt 1048576 ]]; then
+            size_display="$(( expected_size / 1048576 ))MB"
+        elif [[ $expected_size -gt 1024 ]]; then
+            size_display="$(( expected_size / 1024 ))KB"
+        else
+            size_display="${expected_size}B"
+        fi
         
-        # Show file size
-        local file_size
-        file_size=$(du -h "$local_path" | cut -f1)
-        log_info "File size: $file_size"
-        
-        echo "$local_path"
+        log_info "Downloading with progress (Expected size: $size_display)..."
+        # Use AWS CLI with pv for progress monitoring
+        if aws s3 cp "$s3_url" - --region "$S3_REGION" --quiet | pv -s "$expected_size" > "$local_path"; then
+            log_success "Download completed: $local_path"
+        else
+            log_error "Failed to download $file from S3"
+            exit 1
+        fi
     else
-        log_error "Failed to download $file from S3"
-        exit 1
+        log_info "Downloading with progress (size unknown)..."
+        # Use pv without size information for basic progress indication
+        if aws s3 cp "$s3_url" - --region "$S3_REGION" --quiet | pv > "$local_path"; then
+            log_success "Download completed: $local_path"
+        else
+            log_error "Failed to download $file from S3"
+            exit 1
+        fi
     fi
+    
+    # Show actual downloaded file size
+    local file_size
+    file_size=$(du -h "$local_path" | cut -f1)
+    log_info "Downloaded file size: $file_size"
+    
+    echo "$local_path"
 }
 
 import_database() {
