@@ -211,16 +211,32 @@ download_file() {
     
     # Show actual downloaded file size
     local file_size
-    file_size=$(du -h "$local_path" | cut -f1)
-    log_info "Downloaded file size: $file_size"
-    
-    echo "$local_path"
+    if [[ -f "$local_path" ]]; then
+        # Use ls to get file size (more portable than stat)
+        file_size=$(ls -l "$local_path" | awk '{print $5}' 2>/dev/null || echo "unknown")
+        if [[ "$file_size" != "unknown" && "$file_size" =~ ^[0-9]+$ ]]; then
+            if [[ $file_size -gt 1073741824 ]]; then
+                file_size="$(( file_size / 1073741824 ))GB"
+            elif [[ $file_size -gt 1048576 ]]; then
+                file_size="$(( file_size / 1048576 ))MB"
+            elif [[ $file_size -gt 1024 ]]; then
+                file_size="$(( file_size / 1024 ))KB"
+            else
+                file_size="${file_size}B"
+            fi
+        fi
+        log_info "Downloaded file size: $file_size"
+    else
+        log_error "Download file not found at: $local_path"
+        exit 1
+    fi
 }
 
 import_database() {
     local file_path="$1"
     local file_name
-    file_name=$(basename "$file_path")
+    # Use bash parameter expansion instead of basename to avoid argument length issues
+    file_name="${file_path##*/}"
     
     log_info "Starting database import..."
     log_info "File: $file_name"
@@ -301,8 +317,16 @@ main() {
     confirm_import "$SELECTED_FILE"
     
     # Download the selected file
-    local downloaded_file
-    downloaded_file=$(download_file "$SELECTED_FILE")
+    local downloaded_file="$TEMP_DIR/$SELECTED_FILE"
+    
+    # Run download function
+    download_file "$SELECTED_FILE"
+    
+    # Verify the file was downloaded
+    if [[ ! -f "$downloaded_file" ]]; then
+        log_error "Downloaded file not found: $downloaded_file"
+        exit 1
+    fi
     
     # Import the database
     import_database "$downloaded_file"
