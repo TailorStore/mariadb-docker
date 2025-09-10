@@ -5,6 +5,16 @@ FROM mariadb:lts
 ENV MYSQL_DATABASE=myapp
 ENV MYSQL_USER=appuser
 
+# Install MySQLTuner and required dependencies
+RUN apt-get update && apt-get install -y \
+    wget \
+    perl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and install MySQLTuner
+RUN wget https://raw.githubusercontent.com/major/MySQLTuner-perl/master/mysqltuner.pl -O /usr/local/bin/mysqltuner.pl \
+    && chmod +x /usr/local/bin/mysqltuner.pl
+
 # Create directory for custom configuration
 RUN mkdir -p /etc/mysql/conf.d
 
