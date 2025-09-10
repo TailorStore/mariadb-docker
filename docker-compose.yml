@@ -10,8 +10,6 @@ services:
     volumes:
       # Mount host directory for persistent data storage
       - /var/mariadb/data:/var/lib/mysql
-      # Mount host directory for custom configuration
-      - /var/mariadb/config:/etc/mysql/conf.d
       # Mount host directory for initialization scripts
       - /var/mariadb/init:/docker-entrypoint-initdb.d
       # Mount host directory for backups

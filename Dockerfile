@@ -19,11 +19,11 @@ RUN wget https://raw.githubusercontent.com/major/MySQLTuner-perl/master/mysqltun
 # Set Fish as the default shell for root
 RUN chsh -s /usr/bin/fish root
 
-# Create directory for custom configuration
-RUN mkdir -p /etc/mysql/conf.d
+# Copy custom configuration to a dedicated location (avoid volume mount conflict)
+COPY custom.cnf /etc/mysql/conf.d/99-custom.cnf
 
-# Copy custom configuration if it exists
-COPY custom.cnf /etc/mysql/conf.d/
+# Set proper permissions for configuration files
+RUN chmod 644 /etc/mysql/conf.d/99-custom.cnf
 
 # Create directory for initialization scripts
 RUN mkdir -p /docker-entrypoint-initdb.d
