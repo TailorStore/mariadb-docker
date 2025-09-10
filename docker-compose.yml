@@ -19,4 +19,7 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-myapp}
       MYSQL_USER: ${MYSQL_USER:-appuser}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-apppassword}
+      # AWS S3 credentials for database backups
+      AWS_S3_ACCESS_ID: ${AWS_S3_ACCESS_ID}
+      AWS_S3_SECRET_ACCESS_KEY: ${AWS_S3_SECRET_ACCESS_KEY}
     # Using default network to avoid configuration issues

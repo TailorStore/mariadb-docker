@@ -6,20 +6,13 @@
 set -euo pipefail
 
 # Configuration
-S3_BUCKET="ts-database"
+S3_BUCKET="tailorstore-db"
 S3_REGION="eu-west-1"
 TEMP_DIR="/tmp"
 COMPOSE_FILE="docker-compose.yml"
 
-# Database files available
-declare -a DB_FILES=(
-    "analytics.sql.gz"
-    "dps.sql.gz" 
-    "latest.sql.gz"
-    "log.sql.gz"
-    "master_data.sql.gz"
-    "tailorstore_bi.sql.gz"
-)
+# Database files will be loaded dynamically from S3
+declare -a DB_FILES=()
 
 # Colors for output
 RED='\033[0;31m'
@@ -87,6 +80,48 @@ configure_aws() {
     export AWS_DEFAULT_REGION="$S3_REGION"
 }
 
+load_database_files() {
+    log_info "Fetching available database files from S3..."
+    
+    # Get detailed list of .sql.gz files from S3 bucket with size and date info
+    local s3_output
+    s3_output=$(aws s3 ls "s3://$S3_BUCKET/" --region "$S3_REGION" --human-readable | grep '\.sql\.gz$')
+    
+    if [[ -z "$s3_output" ]]; then
+        log_error "No .sql.gz files found in S3 bucket: s3://$S3_BUCKET/"
+        log_info "Available files in bucket:"
+        aws s3 ls "s3://$S3_BUCKET/" --region "$S3_REGION" || log_error "Failed to list bucket contents"
+        exit 1
+    fi
+    
+    # Clear the arrays and populate with S3 files
+    DB_FILES=()
+    declare -g -A DB_FILE_INFO
+    
+    while IFS= read -r line; do
+        if [[ -n "$line" ]]; then
+            # Parse the line: date time size unit filename
+            local parts=($line)
+            local date_part="${parts[0]}"
+            local time_part="${parts[1]}"
+            local size_part="${parts[2]}"
+            local unit_part="${parts[3]}"
+            local filename="${parts[4]}"
+            
+            if [[ -n "$filename" && "$filename" == *.sql.gz ]]; then
+                DB_FILES+=("$filename")
+                DB_FILE_INFO["$filename"]="$size_part $unit_part ($date_part $time_part)"
+            fi
+        fi
+    done <<< "$s3_output"
+    
+    # Sort the files array
+    IFS=$'\n' DB_FILES=($(sort <<< "${DB_FILES[*]}"))
+    unset IFS
+    
+    log_success "Found ${#DB_FILES[@]} database file(s) in S3 bucket"
+}
+
 show_menu() {
     echo
     echo "=============================================="
@@ -97,7 +132,13 @@ show_menu() {
     echo
     
     for i in "${!DB_FILES[@]}"; do
-        printf "%d) %s\n" $((i+1)) "${DB_FILES[$i]}"
+        local filename="${DB_FILES[$i]}"
+        local info="${DB_FILE_INFO[$filename]:-}"
+        if [[ -n "$info" ]]; then
+            printf "%d) %-25s %s\n" $((i+1)) "$filename" "$info"
+        else
+            printf "%d) %s\n" $((i+1)) "$filename"
+        fi
     done
     
     echo
@@ -113,7 +154,7 @@ get_user_choice() {
         if [[ "$choice" == "0" ]]; then
             log_info "Exiting..."
             exit 0
-        elif [[ "$choice" =~ ^[1-6]$ ]] && [[ "$choice" -le "${#DB_FILES[@]}" ]]; then
+        elif [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -le "${#DB_FILES[@]}" ]] && [[ "$choice" -gt 0 ]]; then
             SELECTED_FILE="${DB_FILES[$((choice-1))]}"
             log_info "Selected: $SELECTED_FILE"
             break
@@ -220,6 +261,9 @@ main() {
     
     # Configure AWS
     configure_aws
+    
+    # Load database files from S3
+    load_database_files
     
     # Show menu and get user choice
     show_menu
