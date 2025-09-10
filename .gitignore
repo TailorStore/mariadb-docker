@@ -6,3 +6,4 @@ data/
 
 # Backup files (may contain sensitive data)
 backups/
+.idea
