@@ -1,0 +1,8 @@
+# Environment files with sensitive data
+.env
+
+# MariaDB data directory (contains database files)
+data/
+
+# Backup files (may contain sensitive data)
+backups/
