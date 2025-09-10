@@ -6,7 +6,7 @@ services:
     container_name: mariadb-container
     restart: unless-stopped
     ports:
-      - "3307:3306"
+      - "3306:3306"
     volumes:
       # Mount host directory for persistent data storage
       - /var/mariadb/data:/var/lib/mysql
