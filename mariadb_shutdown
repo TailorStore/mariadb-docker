@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+
+# mariadb_shutdown - Gracefully shuts down MariaDB
+# - Runs inside the container or from the host (via docker exec)
+# - Uses mariadb-admin shutdown when available
+# - Supports timeout and optional force kill fallback
+#
+# Usage:
+#   Inside container:
+#     mariadb_shutdown [--timeout 60] [--force]
+#
+#   From host (requires Docker):
+#     ./mariadb_shutdown --container mariadb-container [--timeout 60] [--force]
+#
+# Exit codes:
+#   0 - success
+#   1 - error
+
+set -euo pipefail
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+log_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
+log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
+
+# Defaults
+TIMEOUT=60
+FORCE=false
+CONTAINER_NAME=""
+DB_USER="root"
+DB_PASSWORD="${MYSQL_ROOT_PASSWORD:-rootpassword}"
+
+usage() {
+  cat <<EOF
+Usage: mariadb_shutdown [options]
+
+Options:
+  -t, --timeout <seconds>   Timeout in seconds to wait for shutdown (default: 60)
+  -f, --force               Force kill mysqld if graceful shutdown times out
+  -c, --container <name>    Run inside the given Docker container name (host-only)
+  -h, --help                Show this help
+
+Examples:
+  Inside container:
+    mariadb_shutdown --timeout 120
+
+  From host:
+    mariadb_shutdown --container mariadb-container --timeout 120 --force
+EOF
+}
+
+# Parse args
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -t|--timeout)
+      TIMEOUT="${2:-}"
+      shift 2
+      ;;
+    -f|--force)
+      FORCE=true
+      shift
+      ;;
+    -c|--container)
+      CONTAINER_NAME="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      log_error "Unknown option: $1"
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+# Helper: wait until MariaDB is down
+wait_down() {
+  local deadline=$(( $(date +%s) + TIMEOUT ))
+  while true; do
+    if ! mariadb -u "$DB_USER" -p"$DB_PASSWORD" -e "SELECT 1;" >/dev/null 2>&1; then
+      return 0
+    fi
+    if [[ $(date +%s) -ge $deadline ]]; then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+# Helper: graceful shutdown inside container
+shutdown_inside() {
+  log_info "Attempting graceful shutdown with mariadb-admin..."
+  if command -v mariadb-admin >/dev/null 2>&1; then
+    if mariadb-admin -u "$DB_USER" -p"$DB_PASSWORD" shutdown >/dev/null 2>&1; then
+      log_info "Shutdown command sent. Waiting up to ${TIMEOUT}s for server to stop..."
+      if wait_down; then
+        log_success "MariaDB stopped gracefully."
+        return 0
+      else
+        log_warn "Timeout waiting for shutdown."
+        return 2
+      fi
+    else
+      log_warn "mariadb-admin shutdown failed (continuing)."
+      return 2
+    fi
+  else
+    log_error "mariadb-admin not found in PATH."
+    return 2
+  fi
+}
+
+# Helper: force kill inside container
+force_kill_inside() {
+  log_warn "Attempting forceful stop of mysqld..."
+  local pidfile="/var/run/mysqld/mysqld.pid"
+  if [[ -f "$pidfile" ]]; then
+    local pid
+    pid=$(cat "$pidfile" 2>/dev/null || true)
+    if [[ -n "${pid:-}" ]]; then
+      log_warn "Sending SIGTERM to mysqld (pid=$pid)..."
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 3
+      if kill -0 "$pid" 2>/dev/null; then
+        log_warn "Process still running. Sending SIGKILL..."
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
+      if ! kill -0 "$pid" 2>/dev/null; then
+        log_success "mysqld process terminated."
+        return 0
+      fi
+    fi
+  fi
+  # Fallback: killall
+  if command -v killall >/dev/null 2>&1; then
+    killall -q mysqld || true
+  else
+    pkill -9 mysqld || true
+  fi
+  log_info "Verifying mysqld is down..."
+  if ! mariadb -u "$DB_USER" -p"$DB_PASSWORD" -e "SELECT 1;" >/dev/null 2>&1; then
+    log_success "MariaDB is down."
+    return 0
+  fi
+  return 1
+}
+
+# If a container name was provided, run the shutdown inside the container
+if [[ -n "$CONTAINER_NAME" ]]; then
+  if ! command -v docker >/dev/null 2>&1; then
+    log_error "Docker not available on host."
+    exit 1
+  fi
+  log_info "Running shutdown inside container: $CONTAINER_NAME"
+  # Use the script inside the container if present; else fallback to mariadb-admin
+  if docker exec "$CONTAINER_NAME" command -v mariadb_shutdown >/dev/null 2>&1; then
+    if docker exec "$CONTAINER_NAME" mariadb_shutdown --timeout "$TIMEOUT" $([[ "$FORCE" == true ]] && echo "--force" || true); then
+      exit 0
+    else
+      exit 1
+    fi
+  else
+    # Fallback path
+    if docker exec "$CONTAINER_NAME" bash -lc 'mariadb-admin -u "${DB_USER:-root}" -p"${MYSQL_ROOT_PASSWORD:-rootpassword}" shutdown' >/dev/null 2>&1; then
+      log_success "Shutdown command executed in container."
+      exit 0
+    else
+      log_error "Failed to shutdown MariaDB in container."
+      exit 1
+    fi
+  fi
+fi
+
+# Otherwise, run inside the current environment (container)
+log_info "Starting MariaDB shutdown (timeout=${TIMEOUT}s, force=${FORCE})"
+if shutdown_inside; then
+  exit 0
+fi
+
+if [[ "$FORCE" == true ]]; then
+  if force_kill_inside; then
+    exit 0
+  else
+    log_error "Force shutdown failed."
+    exit 1
+  fi
+else
+  log_error "Graceful shutdown failed. Re-run with --force to attempt a hard stop."
+  exit 1
+fi
+
