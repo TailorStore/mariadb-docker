@@ -16,7 +16,7 @@ services:
       - /var/mariadb/backups:/backups
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-myapp}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-tailorshirts}
       MYSQL_USER: ${MYSQL_USER:-appuser}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-apppassword}
       # AWS S3 credentials for database backups

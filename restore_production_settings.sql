@@ -4,6 +4,7 @@
 -- Restore durability features for production safety
 SET GLOBAL innodb_flush_log_at_trx_commit = 2;           -- Safe for production (faster than 1)
 SET GLOBAL sync_binlog = 1;                              -- Enable binary log sync
+SET sql_log_bin = 1;                                     -- Re-enable binary logging
 
 -- Reset buffer sizes to production values (from custom.cnf)
 SET GLOBAL key_buffer_size = 32*1024*1024;               -- 32MB
@@ -27,7 +28,7 @@ SET GLOBAL query_cache_size = 128*1024*1024;             -- 128MB
 SET GLOBAL innodb_fast_shutdown = 0;
 
 -- Show restored settings
-SELECT 'Production settings restored' AS Status;
+SELECT 'Production settings restored (binary logging re-enabled)' AS Status;
 SELECT @@innodb_flush_log_at_trx_commit AS flush_log_at_commit,
        @@sync_binlog AS sync_binlog,
        @@innodb_io_capacity AS io_capacity,

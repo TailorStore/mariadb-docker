@@ -5,6 +5,9 @@
 SET GLOBAL innodb_flush_log_at_trx_commit = 0;
 SET GLOBAL sync_binlog = 0;
 
+-- Disable binary logging during import for maximum speed
+SET sql_log_bin = 0;
+
 -- Increase buffer sizes that can be changed dynamically
 SET GLOBAL innodb_log_buffer_size = 64*1024*1024;        -- 64MB
 SET GLOBAL key_buffer_size = 128*1024*1024;              -- 128MB

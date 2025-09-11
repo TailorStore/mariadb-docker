@@ -11,6 +11,9 @@ S3_REGION="eu-west-1"
 TEMP_DIR="/tmp"
 COMPOSE_FILE="docker-compose.yml"
 
+# Command line flags
+PURGE_BINLOGS=false
+
 # Database files will be loaded dynamically from S3
 declare -a DB_FILES=()
 
@@ -36,6 +39,67 @@ log_warning() {
 
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
+}
+
+show_help() {
+    cat << EOF
+Database Backup Downloader & Importer
+
+USAGE:
+    get_database_dump [OPTIONS]
+
+OPTIONS:
+    --purge-binlogs    Delete all existing binary logs before import
+                       (Recommended for development/testing environments)
+    --help, -h         Show this help message
+
+DESCRIPTION:
+    Interactive script to download database backups from S3 and import them
+    into MariaDB. The script will:
+    
+    1. List available .sql.gz files from the S3 bucket
+    2. Allow you to select which file to import
+    3. Download the selected file with progress monitoring
+    4. Apply import optimizations (including disabling binary logging)
+    5. Import the database with progress indication
+    6. Restore production-safe settings after import
+    
+BINARY LOG CLEANUP:
+    Use --purge-binlogs to delete existing binary logs before import.
+    This is recommended for development/testing but use with caution in
+    production environments where binary logs are needed for replication
+    or point-in-time recovery.
+
+EXAMPLES:
+    get_database_dump                    # Standard import (keep existing binary logs)
+    get_database_dump --purge-binlogs    # Import with binary log cleanup
+
+NOTES:
+    - Binary logging is temporarily disabled during import for performance
+    - Import optimizations are applied and restored automatically
+    - The script must be run inside the MariaDB container
+    - AWS credentials must be configured via environment variables
+EOF
+}
+
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --purge-binlogs)
+                PURGE_BINLOGS=true
+                shift
+                ;;
+            --help|-h)
+                # Help is handled in main, but keep this for completeness
+                shift
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                echo "Use --help for usage information"
+                exit 1
+                ;;
+        esac
+    done
 }
 
 check_requirements() {
@@ -232,6 +296,51 @@ download_file() {
     fi
 }
 
+cleanup_binary_logs() {
+    local db_user="root"
+    local db_password="${MYSQL_ROOT_PASSWORD:-rootpassword}"
+    
+    if [[ "$PURGE_BINLOGS" != "true" ]]; then
+        log_info "Skipping binary log cleanup (use --purge-binlogs to enable)"
+        return 0
+    fi
+    
+    log_info "Cleaning up old binary logs before import..."
+    
+    # Check if binary logging is enabled
+    local binlog_enabled
+    binlog_enabled=$(mariadb -u "$db_user" -p"$db_password" -se "SELECT @@log_bin;" 2>/dev/null)
+    
+    if [[ "$binlog_enabled" == "1" ]]; then
+        # Get current binary log file count and size
+        local log_count
+        local log_size
+        log_count=$(mariadb -u "$db_user" -p"$db_password" -se "SHOW BINARY LOGS;" 2>/dev/null | wc -l)
+        
+        if [[ $log_count -gt 0 ]]; then
+            log_info "Found $log_count binary log files"
+            
+            # Calculate total size of binary logs using SHOW BINARY LOGS
+            log_size=$(mariadb -u "$db_user" -p"$db_password" -se "SHOW BINARY LOGS;" 2>/dev/null | awk '{sum += \$2} END {printf "%.2f", sum/1024/1024}')
+            
+            if [[ -n "$log_size" && "$log_size" != "0.00" ]]; then
+                log_info "Total binary log size: ${log_size}MB"
+            fi
+            
+            # Purge all binary logs (keeps only the current active log)
+            if mariadb -u "$db_user" -p"$db_password" -e "RESET MASTER;" 2>/dev/null; then
+                log_success "Binary logs cleaned up successfully"
+            else
+                log_warning "Failed to clean up binary logs (continuing anyway)"
+            fi
+        else
+            log_info "No binary logs found to clean up"
+        fi
+    else
+        log_info "Binary logging is disabled, no cleanup needed"
+    fi
+}
+
 optimize_for_import() {
     local db_user="root"
     local db_password="${MYSQL_ROOT_PASSWORD:-rootpassword}"
@@ -242,12 +351,13 @@ optimize_for_import() {
     mariadb -u "$db_user" -p"$db_password" -e "
         SET GLOBAL innodb_flush_log_at_trx_commit = 0;
         SET GLOBAL sync_binlog = 0;
+        SET sql_log_bin = 0;
         SET GLOBAL innodb_io_capacity = 2000;
         SET GLOBAL innodb_io_capacity_max = 4000;
         SET GLOBAL key_buffer_size = 128*1024*1024;
         SET GLOBAL max_allowed_packet = 1073741824;
         SET GLOBAL query_cache_size = 0;
-        SELECT 'Import optimizations applied' AS Status;
+        SELECT 'Import optimizations applied (binary logging disabled)' AS Status;
     " 2>/dev/null || log_warning "Some optimizations could not be applied"
 }
 
@@ -261,12 +371,13 @@ restore_production_settings() {
     mariadb -u "$db_user" -p"$db_password" -e "
         SET GLOBAL innodb_flush_log_at_trx_commit = 2;
         SET GLOBAL sync_binlog = 1;
+        SET sql_log_bin = 1;
         SET GLOBAL innodb_io_capacity = 200;
         SET GLOBAL innodb_io_capacity_max = 400;
         SET GLOBAL key_buffer_size = 32*1024*1024;
         SET GLOBAL max_allowed_packet = 64*1024*1024;
         SET GLOBAL query_cache_size = 128*1024*1024;
-        SELECT 'Production settings restored' AS Status;
+        SELECT 'Production settings restored (binary logging re-enabled)' AS Status;
     " 2>/dev/null || log_warning "Some settings could not be restored"
 }
 
@@ -286,6 +397,9 @@ import_database() {
     
     log_info "Importing into database: $db_name"
     
+    # Clean up old binary logs to free space and avoid confusion
+    cleanup_binary_logs
+    
     # Apply import optimizations before starting
     optimize_for_import
     
@@ -294,14 +408,16 @@ import_database() {
     
     # Use optimized import with disabled checks for maximum speed
     if {
+        echo "SET SESSION sql_log_bin = 0;";
         echo "SET foreign_key_checks = 0;";
         echo "SET unique_checks = 0;";
         echo "SET autocommit = 0;";
         pv "$file_path" | gunzip;
         echo "COMMIT;";
+        echo "SET autocommit = 1;";
         echo "SET foreign_key_checks = 1;";
         echo "SET unique_checks = 1;";
-        echo "SET autocommit = 1;";
+        echo "SET SESSION sql_log_bin = 1;";
     } | mariadb -u "$db_user" -p"$db_password" "$db_name"; then
         log_success "Database import completed successfully!"
         
@@ -353,8 +469,26 @@ confirm_import() {
 }
 
 main() {
+    # Handle help immediately
+    for arg in "$@"; do
+        if [[ "$arg" == "--help" || "$arg" == "-h" ]]; then
+            show_help
+            exit 0
+        fi
+    done
+    
+    # Parse command line arguments
+    parse_arguments "$@"
+    
     echo "🗄️  Database Backup Downloader & Importer"
     echo "========================================="
+    
+    if [[ "$PURGE_BINLOGS" == "true" ]]; then
+        echo "🗑️  Binary log cleanup: ENABLED"
+    else
+        echo "📝 Binary log cleanup: DISABLED (use --purge-binlogs to enable)"
+    fi
+    echo
     
     # Check all requirements
     check_requirements
