@@ -349,15 +349,36 @@ optimize_for_import() {
     
     # Apply production-safe import optimizations
     mariadb -u "$db_user" -p"$db_password" -e "
+        -- Disable durability and logging for speed
         SET GLOBAL innodb_flush_log_at_trx_commit = 0;
         SET GLOBAL sync_binlog = 0;
         SET sql_log_bin = 0;
+        
+        -- Disable constraint and validation checks
+        SET foreign_key_checks = 0;
+        SET unique_checks = 0;
+        SET autocommit = 0;
+        
+        -- Optimize InnoDB for bulk loading
         SET GLOBAL innodb_io_capacity = 2000;
         SET GLOBAL innodb_io_capacity_max = 4000;
+        SET GLOBAL innodb_buffer_pool_dump_at_shutdown = 0;
+        SET GLOBAL innodb_doublewrite = 0;
+        SET GLOBAL innodb_change_buffering = 'all';
+        SET GLOBAL innodb_stats_on_metadata = 0;
+        
+        -- Increase buffer sizes
         SET GLOBAL key_buffer_size = 128*1024*1024;
         SET GLOBAL max_allowed_packet = 1073741824;
+        SET GLOBAL sort_buffer_size = 32*1024*1024;
+        SET GLOBAL bulk_insert_buffer_size = 256*1024*1024;
+        
+        -- Disable query cache and other overhead
         SET GLOBAL query_cache_size = 0;
-        SELECT 'Import optimizations applied (binary logging disabled)' AS Status;
+        SET GLOBAL general_log = 0;
+        SET GLOBAL slow_query_log = 0;
+        
+        SELECT 'Enhanced import optimizations applied (indexing/constraints optimized)' AS Status;
     " 2>/dev/null || log_warning "Some optimizations could not be applied"
 }
 
@@ -369,15 +390,36 @@ restore_production_settings() {
     
     # Restore production-safe settings
     mariadb -u "$db_user" -p"$db_password" -e "
+        -- Restore durability and logging
         SET GLOBAL innodb_flush_log_at_trx_commit = 2;
         SET GLOBAL sync_binlog = 1;
         SET sql_log_bin = 1;
+        
+        -- Re-enable constraint and validation checks
+        SET foreign_key_checks = 1;
+        SET unique_checks = 1;
+        SET autocommit = 1;
+        
+        -- Restore InnoDB production settings
         SET GLOBAL innodb_io_capacity = 200;
         SET GLOBAL innodb_io_capacity_max = 400;
+        SET GLOBAL innodb_buffer_pool_dump_at_shutdown = 1;
+        SET GLOBAL innodb_doublewrite = 1;
+        SET GLOBAL innodb_change_buffering = 'all';
+        SET GLOBAL innodb_stats_on_metadata = 1;
+        
+        -- Restore buffer sizes to production values
         SET GLOBAL key_buffer_size = 32*1024*1024;
         SET GLOBAL max_allowed_packet = 64*1024*1024;
+        SET GLOBAL sort_buffer_size = 4*1024*1024;
+        SET GLOBAL bulk_insert_buffer_size = 8*1024*1024;
+        
+        -- Re-enable query cache and logging (if desired)
         SET GLOBAL query_cache_size = 128*1024*1024;
-        SELECT 'Production settings restored (binary logging re-enabled)' AS Status;
+        SET GLOBAL general_log = 0;  -- Keep disabled for performance
+        SET GLOBAL slow_query_log = 1;
+        
+        SELECT 'Production settings restored (all optimizations reverted)' AS Status;
     " 2>/dev/null || log_warning "Some settings could not be restored"
 }
 
@@ -406,18 +448,25 @@ import_database() {
     # Import with progress and optimizations
     log_info "Decompressing and importing database (this may take a while)..."
     
-    # Use optimized import with disabled checks for maximum speed
+    # Use optimized import with comprehensive speed optimizations
     if {
+        echo "-- Session-level import optimizations";
         echo "SET SESSION sql_log_bin = 0;";
-        echo "SET foreign_key_checks = 0;";
-        echo "SET unique_checks = 0;";
-        echo "SET autocommit = 0;";
+        echo "SET SESSION foreign_key_checks = 0;";
+        echo "SET SESSION unique_checks = 0;";
+        echo "SET SESSION autocommit = 0;";
+        echo "SET SESSION sql_mode = '';";
+        echo "SET SESSION innodb_lock_wait_timeout = 300;";
+        echo "";
         pv "$file_path" | gunzip;
+        echo "";
+        echo "-- Commit and restore session settings";
         echo "COMMIT;";
-        echo "SET autocommit = 1;";
-        echo "SET foreign_key_checks = 1;";
-        echo "SET unique_checks = 1;";
+        echo "SET SESSION autocommit = 1;";
+        echo "SET SESSION foreign_key_checks = 1;";
+        echo "SET SESSION unique_checks = 1;";
         echo "SET SESSION sql_log_bin = 1;";
+        echo "SET SESSION sql_mode = 'STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION';";
     } | mariadb -u "$db_user" -p"$db_password" "$db_name"; then
         log_success "Database import completed successfully!"
         
