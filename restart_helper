@@ -1,0 +1,114 @@
+#!/bin/bash
+
+# restart_helper - Container-internal restart policy helper
+# This runs inside the container and communicates with host-side restart_control
+
+set -euo pipefail
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+log_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+show_usage() {
+    cat << EOF
+Usage: $0 <command>
+
+Container-internal restart policy helper.
+
+Commands:
+    status      Show container status and restart advice
+    advice      Show restart management advice for the host
+    help        Show this help
+
+This script runs inside the container and provides guidance.
+For actual restart control, use the host-side restart_control script.
+
+EOF
+}
+
+show_status() {
+    log_info "Container-internal restart helper"
+    echo "  - This script runs inside the MariaDB container"
+    echo "  - For restart policy control, use the host-side tools:"
+    echo
+    echo "Host commands:"
+    echo "  ./restart_control status                    # Check restart policy" 
+    echo "  ./restart_control disable                   # Disable auto-restart"
+    echo "  ./restart_control enable                    # Enable auto-restart"
+    echo "  ./mariadb_shutdown --container CONTAINER    # Smart shutdown"
+    echo
+    echo "Container status:"
+    if pgrep -f mysqld >/dev/null 2>&1; then
+        log_success "MariaDB process is running"
+    else
+        log_warning "MariaDB process is not running"
+    fi
+    
+    # Check if we can connect to MariaDB
+    if mariadb -u root -p"${MYSQL_ROOT_PASSWORD:-rootpassword}" -e "SELECT 1;" >/dev/null 2>&1; then
+        log_success "MariaDB is accepting connections"
+    else
+        log_warning "MariaDB is not accepting connections"
+    fi
+}
+
+show_advice() {
+    cat << EOF
+
+📋 Restart Management Advice:
+
+🎯 From Host (outside container):
+   # Check current restart policy
+   ./restart_control status
+
+   # Smart shutdown (handles restart policy automatically)
+   ./mariadb_shutdown --container mariadb-container
+
+   # Manual restart policy control
+   ./restart_control disable    # Disable auto-restart
+   ./restart_control enable     # Re-enable auto-restart
+
+🔧 Quick Operations:
+   # Stop without restart policy hassle
+   docker-compose stop
+
+   # Start back up
+   docker-compose up -d
+
+📊 Inside Container (current environment):
+   # Basic shutdown (will restart due to docker-compose policy)
+   mariadb_shutdown
+
+   # Check MariaDB status
+   mariadb -u root -p\${MYSQL_ROOT_PASSWORD:-rootpassword} -e "SELECT 1;"
+
+The host-side mariadb_shutdown script now automatically handles
+restart policies when you use: --container mariadb-container
+
+EOF
+}
+
+case "${1:-help}" in
+    status)
+        show_status
+        ;;
+    advice)
+        show_advice
+        ;;
+    help|-h|--help)
+        show_usage
+        ;;
+    *)
+        log_error "Unknown command: $1"
+        show_usage
+        exit 1
+        ;;
+esac

@@ -4,7 +4,7 @@ services:
   mariadb:
     build: .
     container_name: mariadb-container
-    restart: unless-stopped  # Change to 'no' to prevent auto-restart during shutdown testing
+    restart: unless-stopped
     ports:
       - "3306:3306"
     volumes:

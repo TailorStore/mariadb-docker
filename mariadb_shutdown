@@ -162,22 +162,45 @@ if [[ -n "$CONTAINER_NAME" ]]; then
     exit 1
   fi
   log_info "Running shutdown inside container: $CONTAINER_NAME"
-  # Use the script inside the container if present; else fallback to mariadb-admin
+  
+  # Step 1: Temporarily disable auto-restart to prevent immediate restart
+  log_info "Temporarily disabling auto-restart..."
+  if [[ -f "restart_control" ]] && [[ -x "restart_control" ]]; then
+    ./restart_control disable >/dev/null 2>&1 || log_warning "Could not disable restart policy"
+    # Apply the policy change
+    if command -v docker-compose >/dev/null 2>&1; then
+      docker-compose up -d --no-build >/dev/null 2>&1 || log_warning "Could not apply restart policy"
+      sleep 2  # Give container time to restart with new policy
+    fi
+  fi
+  
+  # Step 2: Execute shutdown inside container
+  local shutdown_success=false
   if docker exec "$CONTAINER_NAME" command -v mariadb_shutdown >/dev/null 2>&1; then
     if docker exec "$CONTAINER_NAME" mariadb_shutdown --timeout "$TIMEOUT" $([[ "$FORCE" == true ]] && echo "--force" || true); then
-      exit 0
-    else
-      exit 1
+      shutdown_success=true
     fi
   else
     # Fallback path
     if docker exec "$CONTAINER_NAME" bash -lc 'mariadb-admin -u "${DB_USER:-root}" -p"${MYSQL_ROOT_PASSWORD:-rootpassword}" shutdown' >/dev/null 2>&1; then
-      log_success "Shutdown command executed in container."
-      exit 0
-    else
-      log_error "Failed to shutdown MariaDB in container."
-      exit 1
+      shutdown_success=true
     fi
+  fi
+  
+  # Step 3: Restore restart policy if shutdown was successful
+  if [[ "$shutdown_success" == true ]]; then
+    log_success "MariaDB stopped successfully"
+    log_info "Container will remain stopped (restart policy disabled)"
+    log_info "To restart: docker-compose up -d"
+    log_info "To re-enable auto-restart: ./restart_control enable && docker-compose up -d"
+    exit 0
+  else
+    log_error "Shutdown failed, restoring restart policy..."
+    if [[ -f "restart_control" ]] && [[ -x "restart_control" ]]; then
+      ./restart_control enable >/dev/null 2>&1
+      docker-compose up -d --no-build >/dev/null 2>&1
+    fi
+    exit 1
   fi
 fi
 
