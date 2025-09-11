@@ -32,17 +32,11 @@ COPY custom.cnf /etc/mysql/conf.d/99-custom.cnf
 # Copy database dump and management scripts to container PATH
 COPY get_database_dump /usr/local/bin/get_database_dump
 COPY import_in_screen /usr/local/bin/import_in_screen
-COPY mariadb_shutdown /usr/local/bin/mariadb_shutdown
-COPY restart_control /usr/local/bin/restart_control
-COPY restart_helper /usr/local/bin/restart_helper
 
 # Set proper permissions for configuration and script files
 RUN chmod 644 /etc/mysql/conf.d/99-custom.cnf && \
     chmod +x /usr/local/bin/get_database_dump && \
-    chmod +x /usr/local/bin/import_in_screen && \
-    chmod +x /usr/local/bin/mariadb_shutdown && \
-    chmod +x /usr/local/bin/restart_control && \
-    chmod +x /usr/local/bin/restart_helper
+    chmod +x /usr/local/bin/import_in_screen
 
 # Create directory for initialization scripts
 RUN mkdir -p /docker-entrypoint-initdb.d
