@@ -1,0 +1,157 @@
+#!/bin/bash
+
+# import_in_screen - Run database import in a detached screen session
+# This allows long-running imports to continue even if SSH connection is lost
+
+set -euo pipefail
+
+# Configuration
+SCREEN_SESSION_NAME="db_import_$(date +%Y%m%d_%H%M%S)"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Helper functions
+log_info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+log_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+show_usage() {
+    cat << EOF
+Usage: $0 [OPTIONS]
+
+Run database import in a detached screen session for long-running operations.
+
+Options:
+    -h, --help      Show this help message
+    -l, --list      List active screen sessions
+    -a, --attach    Attach to the most recent import session
+    -k, --kill      Kill all import screen sessions
+
+Examples:
+    # Start a new import in screen
+    $0
+
+    # List active import sessions
+    $0 --list
+
+    # Attach to running import
+    $0 --attach
+
+    # Kill all import sessions
+    $0 --kill
+
+Screen Commands (when attached):
+    Ctrl+A, D       Detach from screen session (import continues)
+    Ctrl+A, K       Kill current screen session
+    Ctrl+A, ?       Show help
+
+EOF
+}
+
+list_sessions() {
+    log_info "Active database import screen sessions:"
+    screen -ls | grep "db_import" || echo "No active import sessions found."
+}
+
+attach_to_session() {
+    local latest_session
+    latest_session=$(screen -ls | grep "db_import" | head -1 | awk '{print $1}' | cut -d. -f2-)
+    
+    if [[ -n "$latest_session" ]]; then
+        log_info "Attaching to session: $latest_session"
+        log_warning "Use Ctrl+A, D to detach (import will continue running)"
+        screen -r "$latest_session"
+    else
+        log_error "No active import sessions found."
+        exit 1
+    fi
+}
+
+kill_sessions() {
+    log_warning "Killing all database import screen sessions..."
+    screen -ls | grep "db_import" | awk '{print $1}' | while read session; do
+        screen -S "${session}" -X quit
+        log_info "Killed session: ${session}"
+    done || log_info "No sessions to kill."
+}
+
+start_import_session() {
+    log_info "Starting database import in screen session: $SCREEN_SESSION_NAME"
+    log_info "The import will run in the background and can be monitored/detached safely."
+    echo
+    log_warning "To attach to this session later, run:"
+    log_warning "  docker exec -it mariadb-container import_in_screen --attach"
+    echo
+    log_warning "To detach from the session (while keeping import running):"
+    log_warning "  Press Ctrl+A, then D"
+    echo
+    
+    # Create screen session and run the database import
+    screen -dmS "$SCREEN_SESSION_NAME" bash -c "
+        echo 'Database Import Session Started: $(date)'
+        echo 'Session Name: $SCREEN_SESSION_NAME'
+        echo '=========================================='
+        echo
+        echo 'Starting get_database_dump...'
+        echo
+        get_database_dump
+        echo
+        echo '=========================================='
+        echo 'Import completed at: $(date)'
+        echo 'Press any key to close this session...'
+        read -n 1
+    "
+    
+    sleep 2
+    log_success "Screen session '$SCREEN_SESSION_NAME' started successfully!"
+    log_info "Attaching to the session now..."
+    echo
+    
+    # Auto-attach to the new session
+    screen -r "$SCREEN_SESSION_NAME"
+}
+
+# Parse command line arguments
+case "${1:-}" in
+    -h|--help)
+        show_usage
+        exit 0
+        ;;
+    -l|--list)
+        list_sessions
+        exit 0
+        ;;
+    -a|--attach)
+        attach_to_session
+        exit 0
+        ;;
+    -k|--kill)
+        kill_sessions
+        exit 0
+        ;;
+    "")
+        start_import_session
+        ;;
+    *)
+        log_error "Unknown option: $1"
+        show_usage
+        exit 1
+        ;;
+esac
