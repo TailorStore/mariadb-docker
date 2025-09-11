@@ -1,0 +1,187 @@
+#!/bin/bash
+
+# restart_control - Control MariaDB container restart behavior
+# Helps manage Docker Compose restart policy for shutdown operations
+
+set -euo pipefail
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+log_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+COMPOSE_FILE="docker-compose.yml"
+
+show_usage() {
+    cat << EOF
+Usage: $0 <command>
+
+Commands:
+    disable     Disable auto-restart (set restart: no)
+    enable      Enable auto-restart (set restart: unless-stopped)  
+    status      Show current restart policy
+    shutdown    Disable restart, shutdown MariaDB, wait for confirmation to re-enable
+
+Examples:
+    # Disable auto-restart for maintenance
+    $0 disable
+
+    # Shutdown with restart protection
+    $0 shutdown
+
+    # Re-enable auto-restart for production
+    $0 enable
+
+    # Check current status
+    $0 status
+EOF
+}
+
+get_current_policy() {
+    if [[ -f "$COMPOSE_FILE" ]]; then
+        grep -E "^\s*restart:" "$COMPOSE_FILE" | awk '{print $2}' | head -1
+    else
+        echo "unknown"
+    fi
+}
+
+set_restart_policy() {
+    local policy="$1"
+    local comment="$2"
+    
+    if [[ ! -f "$COMPOSE_FILE" ]]; then
+        log_error "docker-compose.yml not found"
+        return 1
+    fi
+    
+    # Update restart policy with comment
+    sed -i.bak "s/^\s*restart:.*/    restart: $policy  # $comment/" "$COMPOSE_FILE"
+    
+    log_success "Restart policy set to: $policy"
+}
+
+disable_restart() {
+    log_info "Disabling auto-restart..."
+    set_restart_policy "no" "Auto-restart disabled for maintenance"
+    
+    log_warning "MariaDB will NOT auto-restart if it stops"
+    log_info "To re-enable: $0 enable"
+}
+
+enable_restart() {
+    log_info "Enabling auto-restart..."
+    set_restart_policy "unless-stopped" "Auto-restart enabled for production"
+    
+    log_success "MariaDB will auto-restart unless manually stopped"
+}
+
+show_status() {
+    local policy
+    policy=$(get_current_policy)
+    
+    log_info "Current restart policy: $policy"
+    
+    case "$policy" in
+        "no")
+            log_warning "Auto-restart is DISABLED"
+            echo "  - MariaDB will not restart if it crashes or stops"
+            echo "  - Good for: Testing, maintenance, manual control"
+            ;;
+        "unless-stopped")
+            log_success "Auto-restart is ENABLED"
+            echo "  - MariaDB will restart automatically unless manually stopped"
+            echo "  - Good for: Production, high availability"
+            ;;
+        "always")
+            log_info "Auto-restart is ALWAYS ON"
+            echo "  - MariaDB will always restart, even if manually stopped"
+            echo "  - Very aggressive restart policy"
+            ;;
+        *)
+            log_error "Unknown or missing restart policy: $policy"
+            ;;
+    esac
+    
+    # Check if container is running
+    if docker ps -q -f name=mariadb-container >/dev/null 2>&1; then
+        log_info "Container status: RUNNING"
+    else
+        log_warning "Container status: STOPPED"
+    fi
+}
+
+shutdown_with_protection() {
+    log_info "Protected shutdown sequence initiated..."
+    
+    # Step 1: Disable restart
+    disable_restart
+    
+    # Step 2: Recreate container with new policy
+    log_info "Applying restart policy change..."
+    docker-compose up -d --no-build
+    
+    # Step 3: Wait for container to be ready
+    log_info "Waiting for MariaDB to be ready..."
+    sleep 5
+    
+    # Step 4: Shutdown MariaDB
+    log_info "Shutting down MariaDB gracefully..."
+    if ./mariadb_shutdown --container mariadb-container --timeout 60; then
+        log_success "MariaDB stopped successfully"
+    else
+        log_error "Shutdown failed"
+        return 1
+    fi
+    
+    # Step 5: Confirm container is stopped
+    log_info "Confirming container status..."
+    if docker ps -q -f name=mariadb-container >/dev/null 2>&1; then
+        log_warning "Container is still running (unexpected)"
+    else
+        log_success "Container is stopped and will not auto-restart"
+    fi
+    
+    echo
+    log_warning "MariaDB is now stopped with auto-restart DISABLED"
+    log_info "To restart manually: docker-compose up -d"
+    log_info "To re-enable auto-restart: $0 enable"
+    
+    read -p "Press Enter to re-enable auto-restart, or Ctrl+C to leave disabled..."
+    enable_restart
+    log_info "Auto-restart re-enabled. To start MariaDB: docker-compose up -d"
+}
+
+case "${1:-}" in
+    disable)
+        disable_restart
+        ;;
+    enable)
+        enable_restart
+        ;;
+    status)
+        show_status
+        ;;
+    shutdown)
+        shutdown_with_protection
+        ;;
+    -h|--help|help)
+        show_usage
+        ;;
+    "")
+        log_error "Missing command"
+        show_usage
+        exit 1
+        ;;
+    *)
+        log_error "Unknown command: $1"
+        show_usage
+        exit 1
+        ;;
+esac
