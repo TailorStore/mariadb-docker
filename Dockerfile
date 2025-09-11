@@ -38,8 +38,11 @@ RUN chmod 644 /etc/mysql/conf.d/99-custom.cnf && \
     chmod +x /usr/local/bin/get_database_dump && \
     chmod +x /usr/local/bin/import_in_screen
 
-# Create directory for initialization scripts
-RUN mkdir -p /docker-entrypoint-initdb.d
+# Create directory for initialization scripts and log directory
+RUN mkdir -p /docker-entrypoint-initdb.d && \
+    mkdir -p /var/log && \
+    touch /var/log/mariadb_import.log && \
+    chmod 666 /var/log/mariadb_import.log
 
 # Set proper permissions
 RUN chown -R mysql:mysql /var/lib/mysql

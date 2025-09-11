@@ -3,10 +3,20 @@
 # import_in_screen - Run database import in a detached screen session
 # This allows long-running imports to continue even if SSH connection is lost
 
-set -euo pipefail
+set -uo pipefail
 
 # Configuration
 SCREEN_SESSION_NAME="db_import_$(date +%Y%m%d_%H%M%S)"
+LOG_FILE="/var/log/mariadb_import.log"
+
+# Ensure log directory exists
+mkdir -p "$(dirname "$LOG_FILE")"
+
+# Function to log to both screen/stderr and log file
+log_to_file() {
+    local message="$1"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $message" | tee -a "$LOG_FILE"
+}
 
 # Colors for output
 RED='\033[0;31m'
@@ -18,18 +28,22 @@ NC='\033[0m' # No Color
 # Helper functions
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
+    log_to_file "[INFO] $1"
 }
 
 log_success() {
     echo -e "${GREEN}[SUCCESS]${NC} $1"
+    log_to_file "[SUCCESS] $1"
 }
 
 log_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
+    log_to_file "[WARNING] $1" >&2
 }
 
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    echo -e "${RED}[ERROR]${NC} $1" >&2
+    log_to_file "[ERROR] $1" >&2
 }
 
 show_usage() {
@@ -105,16 +119,32 @@ start_import_session() {
     
     # Create screen session and run the database import
     screen -dmS "$SCREEN_SESSION_NAME" bash -c "
+        set +e  # Don't exit on errors
+        
         echo 'Database Import Session Started: $(date)'
         echo 'Session Name: $SCREEN_SESSION_NAME'
+        echo 'Logging to: $LOG_FILE'
         echo '=========================================='
         echo
         echo 'Starting get_database_dump...'
         echo
-        get_database_dump
+        
+        # Run the import and capture both stdout and stderr
+        if get_database_dump 2>&1 | tee -a '$LOG_FILE'; then
+            echo
+            echo '=========================================='
+            echo 'Import completed successfully at: $(date)'
+            echo 'SUCCESS: Database import finished without errors'
+        else
+            echo
+            echo '=========================================='
+            echo 'Import encountered errors at: $(date)'
+            echo 'ERROR: Database import failed - check the output above and log file: $LOG_FILE'
+        fi
+        
         echo
-        echo '=========================================='
-        echo 'Import completed at: $(date)'
+        echo 'Screen session will remain open for review.'
+        echo 'Press Ctrl+A, D to detach or Ctrl+A, K to kill this session.'
         echo 'Press any key to close this session...'
         read -n 1
     "

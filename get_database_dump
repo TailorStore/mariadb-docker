@@ -3,7 +3,7 @@
 # get_database_dump - Interactive S3 database backup downloader and importer
 # Downloads database dumps from S3 and imports them into MariaDB
 
-set -euo pipefail
+set -uo pipefail
 
 # Configuration
 S3_BUCKET="tailorstore-db"
@@ -25,6 +25,42 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Helper functions
+# Function to check if pv is working properly
+check_pv_working() {
+    # Test if pv displays progress properly in current environment
+    echo "test" | pv -f -q >/dev/null 2>&1
+    return $?
+}
+
+# Function to show download progress with fallback
+show_download_progress() {
+    local file="$1"
+    local expected_size="$2"
+    
+    if check_pv_working; then
+        if [[ -n "$expected_size" && "$expected_size" =~ ^[0-9]+$ ]]; then
+            pv -f -s "$expected_size" -N "Downloading $file"
+        else
+            pv -f -N "Downloading $file"
+        fi
+    else
+        log_info "Progress monitoring unavailable, downloading in background..."
+        cat
+    fi
+}
+
+# Function to show import progress with fallback
+show_import_progress() {
+    local file_path="$1"
+    
+    if check_pv_working; then
+        pv -f -N "Importing $(basename "$file_path")" "$file_path"
+    else
+        log_info "Progress monitoring unavailable, importing in background..."
+        cat "$file_path"
+    fi
+}
+
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
 }
@@ -34,11 +70,11 @@ log_success() {
 }
 
 log_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
+    echo -e "${YELLOW}[WARNING]${NC} $1" >&2
 }
 
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    echo -e "${RED}[ERROR]${NC} $1" >&2
 }
 
 show_help() {
@@ -108,33 +144,34 @@ check_requirements() {
     # Check if AWS CLI is installed
     if ! command -v aws &> /dev/null; then
         log_error "AWS CLI is not installed. Please install it first."
-        exit 1
+        return 1
     fi
     
     # Check if pv is installed
     if ! command -v pv &> /dev/null; then
         log_error "pv (Pipe Viewer) is not installed. Please install it first."
-        exit 1
+        return 1
     fi
     
     # Check environment variables
     if [[ -z "${AWS_S3_ACCESS_ID:-}" ]]; then
         log_error "AWS_S3_ACCESS_ID environment variable is not set."
-        exit 1
+        return 1
     fi
     
     if [[ -z "${AWS_S3_SECRET_ACCESS_KEY:-}" ]]; then
         log_error "AWS_S3_SECRET_ACCESS_KEY environment variable is not set."
-        exit 1
+        return 1
     fi
     
     # Check if MariaDB is accessible (we're running inside the container)
     if ! mariadb --version &> /dev/null; then
         log_error "MariaDB is not available."
-        exit 1
+        return 1
     fi
     
     log_success "All requirements satisfied."
+    return 0
 }
 
 configure_aws() {
@@ -155,7 +192,7 @@ load_database_files() {
         log_error "No .sql.gz files found in S3 bucket: s3://$S3_BUCKET/"
         log_info "Available files in bucket:"
         aws s3 ls "s3://$S3_BUCKET/" --region "$S3_REGION" || log_error "Failed to list bucket contents"
-        exit 1
+        return 1
     fi
     
     # Clear the arrays and populate with S3 files
@@ -217,7 +254,7 @@ get_user_choice() {
         
         if [[ "$choice" == "0" ]]; then
             log_info "Exiting..."
-            exit 0
+            return 1
         elif [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -le "${#DB_FILES[@]}" ]] && [[ "$choice" -gt 0 ]]; then
             SELECTED_FILE="${DB_FILES[$((choice-1))]}"
             log_info "Selected: $SELECTED_FILE"
@@ -255,21 +292,21 @@ download_file() {
         fi
         
         log_info "Downloading with progress (Expected size: $size_display)..."
-        # Use AWS CLI with pv for progress monitoring
-        if aws s3 cp "$s3_url" - --region "$S3_REGION" --quiet | pv -s "$expected_size" > "$local_path"; then
+        # Use AWS CLI with progress monitoring
+        if aws s3 cp "$s3_url" - --region "$S3_REGION" --quiet | show_download_progress "$file" "$expected_size" > "$local_path"; then
             log_success "Download completed: $local_path"
         else
             log_error "Failed to download $file from S3"
-            exit 1
+            return 1
         fi
     else
         log_info "Downloading with progress (size unknown)..."
-        # Use pv without size information for basic progress indication
-        if aws s3 cp "$s3_url" - --region "$S3_REGION" --quiet | pv > "$local_path"; then
+        # Use progress monitoring without size information
+        if aws s3 cp "$s3_url" - --region "$S3_REGION" --quiet | show_download_progress "$file" "" > "$local_path"; then
             log_success "Download completed: $local_path"
         else
             log_error "Failed to download $file from S3"
-            exit 1
+            return 1
         fi
     fi
     
@@ -292,7 +329,7 @@ download_file() {
         log_info "Downloaded file size: $file_size"
     else
         log_error "Download file not found at: $local_path"
-        exit 1
+        return 1
     fi
 }
 
@@ -458,7 +495,7 @@ import_database() {
         echo "SET SESSION sql_mode = '';";
         echo "SET SESSION innodb_lock_wait_timeout = 300;";
         echo "";
-        pv "$file_path" | gunzip;
+        show_import_progress "$file_path" | gunzip;
         echo "";
         echo "-- Commit and restore session settings";
         echo "COMMIT;";
@@ -476,7 +513,7 @@ import_database() {
         log_error "Database import failed!"
         # Restore production settings even on failure
         restore_production_settings
-        exit 1
+        return 1
     fi
 }
 
@@ -512,7 +549,7 @@ confirm_import() {
             ;;
         *)
             log_info "Import cancelled by user."
-            exit 0
+            return 1
             ;;
     esac
 }
@@ -540,35 +577,55 @@ main() {
     echo
     
     # Check all requirements
-    check_requirements
+    if ! check_requirements; then
+        log_error "Requirements check failed. Cannot proceed with import."
+        return 1
+    fi
     
     # Configure AWS
     configure_aws
     
     # Load database files from S3
-    load_database_files
+    if ! load_database_files; then
+        log_error "Failed to load database files from S3. Cannot proceed."
+        return 1
+    fi
     
     # Show menu and get user choice
     show_menu
-    get_user_choice
+    if ! get_user_choice; then
+        log_error "No file selected or user cancelled. Exiting."
+        return 1
+    fi
     
     # Confirm the import operation
-    confirm_import "$SELECTED_FILE"
+    if ! confirm_import "$SELECTED_FILE"; then
+        log_error "Import not confirmed. Exiting."
+        return 1
+    fi
     
     # Download the selected file
     local downloaded_file="$TEMP_DIR/$SELECTED_FILE"
     
     # Run download function
-    download_file "$SELECTED_FILE"
+    if ! download_file "$SELECTED_FILE"; then
+        log_error "Failed to download file: $SELECTED_FILE"
+        return 1
+    fi
     
     # Verify the file was downloaded
     if [[ ! -f "$downloaded_file" ]]; then
         log_error "Downloaded file not found: $downloaded_file"
-        exit 1
+        return 1
     fi
     
     # Import the database
-    import_database "$downloaded_file"
+    if ! import_database "$downloaded_file"; then
+        log_error "Database import failed for file: $downloaded_file"
+        # Still try to clean up
+        cleanup_file "$downloaded_file"
+        return 1
+    fi
     
     # Clean up
     cleanup_file "$downloaded_file"
@@ -581,5 +638,9 @@ main() {
 # Handle script interruption
 trap 'log_error "Script interrupted. Cleaning up..."; exit 1' INT TERM
 
-# Run main function
-main "$@"
+# Run main function and return its exit code
+if main "$@"; then
+    exit 0
+else
+    exit 1
+fi
